@@ -1,0 +1,3 @@
+terraform/.terraform.lock.hcl
+terraform/.terraform/providers/registry.terraform.io/hashicorp/helm/3.1.1/linux_amd64/terraform-provider-helm_v3.1.1_x5
+terraform/.terraform/providers/registry.terraform.io/hashicorp/helm/3.1.1/linux_amd64/LICENSE.txt
