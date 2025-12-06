@@ -1,0 +1,16 @@
+# =============================================================================
+# Namespace - Tech Challenge
+# =============================================================================
+# Este arquivo define o namespace padrão para a aplicação no Kubernetes
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tech-challenge
+  labels:
+    name: tech-challenge
+    environment: production
+    team: fiap-grupo19
+    managed-by: terraform
+  annotations:
+    description: "Namespace para a aplicação Tech Challenge - API de Oficina"
