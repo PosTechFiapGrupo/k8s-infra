@@ -137,3 +137,15 @@ variable "additional_tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "enable_vpc_flow_logs" {
+  description = "Habilita VPC Flow Logs (requer permissões IAM/CloudWatch)."
+  type        = bool
+  default     = false
+}
+
+variable "enable_eks" {
+  description = "Habilita criação do EKS (requer permissões IAM)."
+  type        = bool
+  default     = true
+}

@@ -28,12 +28,13 @@ public_subnet_cidrs = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
 # Configurações de EKS
 # =============================================================================
 
+enable_eks = true
 eks_cluster_version     = "1.29"
-eks_node_instance_types = ["t3.medium"]
-eks_node_desired_size   = 2
+eks_node_instance_types = ["t3a.medium"]
+eks_node_desired_size   = 1
 eks_node_min_size       = 1
-eks_node_max_size       = 4
-eks_node_disk_size      = 50
+eks_node_max_size       = 3
+eks_node_disk_size      = 20
 
 # =============================================================================
 # Configurações de RDS (se aplicável)

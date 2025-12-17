@@ -269,12 +269,10 @@ eks_node_max_size       = 4
 ### 3. Crie o Backend Remoto (primeira vez)
 
 ```bash
-# Comente o bloco backend "s3" em backend.tf temporariamente
+cd terraform/bootstrap
 terraform init
-terraform apply -target=aws_s3_bucket.terraform_state -target=aws_dynamodb_table.terraform_locks
-
-# Descomente o bloco backend "s3" e migre o state
-terraform init -migrate-state
+terraform apply -var-file=../terraform.tfvars
+terraform output -raw state_bucket_name
 ```
 
 ---
@@ -284,16 +282,26 @@ terraform init -migrate-state
 ### Deploy Completo
 
 ```bash
-cd terraform
+cd ../
+
+BUCKET="$(cd bootstrap && terraform output -raw terraform_state_bucket)"
+REGION="us-east-1"
+NS="grupo19"   # use um namespace diferente por pessoa (ex: rian, emerson, grupo19)
 
 # Inicializar
-terraform init
+terraform init -reconfigure \
+  -backend-config="bucket=${BUCKET}" \
+  -backend-config="key=infra/${NS}/terraform.tfstate" \
+  -backend-config="region=${REGION}" \
+  -backend-config="encrypt=true" \
+  -backend-config="use_lockfile=true"
+
 
 # Visualizar mudanças
-terraform plan
+terraform plan -var-file=terraform.tfvars
 
 # Aplicar infraestrutura
-terraform apply
+terraform apply -var-file=terraform.tfvars
 ```
 
 ### Deploy por Módulo
@@ -313,10 +321,10 @@ terraform apply -target=module.eks
 
 ```bash
 # Visualizar o que será destruído
-terraform plan -destroy
+terraform plan -destroy -var-file=terraform.tfvars
 
 # Destruir tudo
-terraform destroy
+terraform destroy -var-file=terraform.tfvars
 ```
 
 ---
@@ -365,15 +373,20 @@ kubectl get pods -n kube-system
 Se você trabalha com múltiplos clusters:
 
 ```bash
+
+# Pega o contexto diretamente do Terraform (sem precisar do eks_cluster_name)
+EKS_CONTEXT="$(terraform output -raw kubectl_config_context)"
+
 # Listar contextos
 kubectl config get-contexts
 
 # Alternar contexto
-kubectl config use-context arn:aws:eks:us-east-1:123456789:cluster/tech-challenge-dev-eks
+kubectl config use-context "${EKS_CONTEXT}"
 
-# Criar alias para facilitar
-alias k-dev='kubectl --context=arn:aws:eks:us-east-1:123456789:cluster/tech-challenge-dev-eks'
-```
+# Criar alias automático
+alias k-dev="kubectl --context=${EKS_CONTEXT}"
+
+echo "Contexto configurado: ${EKS_CONTEXT}"
 
 ---
 

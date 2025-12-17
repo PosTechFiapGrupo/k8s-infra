@@ -25,6 +25,7 @@ module "vpc" {
   private_subnet_cidrs = var.private_subnet_cidrs
   public_subnet_cidrs  = var.public_subnet_cidrs
   additional_tags      = var.additional_tags
+  enable_vpc_flow_logs = var.enable_vpc_flow_logs
 }
 
 # =============================================================================
@@ -46,6 +47,7 @@ module "security_groups" {
 # =============================================================================
 
 module "eks" {
+  count  = var.enable_eks ? 1 : 0
   source = "./modules/eks"
 
   project_name           = var.project_name

@@ -106,3 +106,4 @@ kubeconfig
 .env
 .env.*
 !.env.example
+**/*.terraform.lock.hcl

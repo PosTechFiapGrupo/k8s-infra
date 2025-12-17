@@ -49,6 +49,12 @@ output "public_subnet_cidrs" {
 # Security Group Outputs
 # =============================================================================
 
+output "eks_cluster_name" {
+  description = "Nome do cluster EKS"
+  value       = var.enable_eks ? module.eks[0].cluster_name : null
+}
+
+
 output "eks_security_group_id" {
   description = "ID do Security Group do EKS Cluster"
   value       = module.security_groups.eks_cluster_sg_id
@@ -78,51 +84,47 @@ output "alb_security_group_id" {
 # EKS Outputs
 # =============================================================================
 
-output "eks_cluster_name" {
-  description = "Nome do cluster EKS"
-  value       = module.eks.cluster_name
-}
-
 output "eks_cluster_endpoint" {
   description = "Endpoint do cluster EKS"
-  value       = module.eks.cluster_endpoint
+  value       = var.enable_eks ? module.eks[0].cluster_endpoint : null
 }
 
 output "eks_cluster_version" {
   description = "Versão do Kubernetes no cluster"
-  value       = module.eks.cluster_version
+  value       = var.enable_eks ? module.eks[0].cluster_version : null
 }
 
 output "eks_cluster_arn" {
   description = "ARN do cluster EKS"
-  value       = module.eks.cluster_arn
+  value       = var.enable_eks ? module.eks[0].cluster_arn : null
 }
 
 output "eks_cluster_certificate_authority_data" {
   description = "Certificate Authority data do cluster EKS"
-  value       = module.eks.cluster_certificate_authority_data
+  value       = var.enable_eks ? module.eks[0].cluster_certificate_authority_data : null
   sensitive   = true
 }
 
 output "eks_cluster_security_group_id" {
   description = "ID do Security Group criado pelo EKS"
-  value       = module.eks.cluster_security_group_id
+  value       = var.enable_eks ? module.eks[0].cluster_security_group_id : null
 }
 
 output "eks_node_group_arn" {
   description = "ARN do Node Group"
-  value       = module.eks.node_group_arn
+  value       = var.enable_eks ? module.eks[0].node_group_arn : null
 }
 
 output "eks_oidc_provider_arn" {
   description = "ARN do OIDC Provider para IRSA"
-  value       = module.eks.oidc_provider_arn
+  value       = var.enable_eks ? module.eks[0].oidc_provider_arn : null
 }
 
 output "eks_oidc_provider_url" {
   description = "URL do OIDC Provider"
-  value       = module.eks.oidc_provider_url
+  value       = var.enable_eks ? module.eks[0].oidc_provider_url : null
 }
+
 
 # =============================================================================
 # IAM Outputs
@@ -130,23 +132,24 @@ output "eks_oidc_provider_url" {
 
 output "eks_cluster_role_arn" {
   description = "ARN da IAM Role do cluster EKS"
-  value       = module.eks.cluster_iam_role_arn
+  value       = var.enable_eks ? module.eks[0].cluster_iam_role_arn : null
 }
 
 output "eks_node_role_arn" {
   description = "ARN da IAM Role dos worker nodes"
-  value       = module.eks.node_iam_role_arn
+  value       = var.enable_eks ? module.eks[0].node_iam_role_arn : null
 }
 
 output "irsa_base_role_arn" {
   description = "ARN da IAM Role base para IRSA"
-  value       = module.eks.irsa_base_role_arn
+  value       = var.enable_eks ? module.eks[0].irsa_base_role_arn : null
 }
 
 output "secrets_manager_role_arn" {
   description = "ARN da IAM Role para acesso ao Secrets Manager"
-  value       = module.eks.secrets_manager_role_arn
+  value       = var.enable_eks ? module.eks[0].secrets_manager_role_arn : null
 }
+
 
 # =============================================================================
 # Networking Outputs
@@ -168,13 +171,14 @@ output "internet_gateway_id" {
 
 output "kubeconfig_command" {
   description = "Comando para configurar o kubeconfig"
-  value       = "aws eks update-kubeconfig --name ${module.eks.cluster_name} --region ${var.aws_region}"
+  value       = var.enable_eks ? "aws eks update-kubeconfig --name ${module.eks[0].cluster_name} --region ${var.aws_region}" : null
 }
 
 output "kubectl_config_context" {
   description = "Contexto do kubectl para este cluster"
-  value       = "arn:aws:eks:${var.aws_region}:${data.aws_caller_identity.current.account_id}:cluster/${module.eks.cluster_name}"
+  value       = var.enable_eks ? "arn:aws:eks:${var.aws_region}:${data.aws_caller_identity.current.account_id}:cluster/${module.eks[0].cluster_name}" : null
 }
+
 
 # =============================================================================
 # Resumo da Infraestrutura
@@ -205,11 +209,11 @@ output "infrastructure_summary" {
       alb         = module.security_groups.alb_sg_id
     }
 
-    eks = {
-      cluster_name = module.eks.cluster_name
-      endpoint     = module.eks.cluster_endpoint
-      version      = module.eks.cluster_version
-      oidc_arn     = module.eks.oidc_provider_arn
-    }
+    eks = var.enable_eks ? {
+      cluster_name = module.eks[0].cluster_name
+      endpoint     = module.eks[0].cluster_endpoint
+      version      = module.eks[0].cluster_version
+      oidc_arn     = module.eks[0].oidc_provider_arn
+    } : null
   }
 }

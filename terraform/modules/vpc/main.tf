@@ -190,25 +190,12 @@ resource "aws_route_table_association" "private" {
   route_table_id = aws_route_table.private[var.single_nat_gateway ? 0 : count.index].id
 }
 
-# =============================================================================
+## =============================================================================
 # VPC Flow Logs (Opcional - para auditoria)
 # =============================================================================
 
-resource "aws_flow_log" "main" {
-  iam_role_arn    = aws_iam_role.flow_logs.arn
-  log_destination = aws_cloudwatch_log_group.flow_logs.arn
-  traffic_type    = "ALL"
-  vpc_id          = aws_vpc.main.id
-
-  tags = merge(
-    local.common_tags,
-    {
-      Name = "${local.name}-flow-logs"
-    }
-  )
-}
-
 resource "aws_cloudwatch_log_group" "flow_logs" {
+  count             = var.enable_vpc_flow_logs ? 1 : 0
   name              = "/aws/vpc/${local.name}-flow-logs"
   retention_in_days = 30
 
@@ -216,7 +203,8 @@ resource "aws_cloudwatch_log_group" "flow_logs" {
 }
 
 resource "aws_iam_role" "flow_logs" {
-  name = "${local.name}-vpc-flow-logs-role"
+  count = var.enable_vpc_flow_logs ? 1 : 0
+  name  = "${local.name}-vpc-flow-logs-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -235,8 +223,9 @@ resource "aws_iam_role" "flow_logs" {
 }
 
 resource "aws_iam_role_policy" "flow_logs" {
-  name = "${local.name}-vpc-flow-logs-policy"
-  role = aws_iam_role.flow_logs.id
+  count = var.enable_vpc_flow_logs ? 1 : 0
+  name  = "${local.name}-vpc-flow-logs-policy"
+  role  = aws_iam_role.flow_logs[0].id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -254,4 +243,19 @@ resource "aws_iam_role_policy" "flow_logs" {
       }
     ]
   })
+}
+
+resource "aws_flow_log" "main" {
+  count           = var.enable_vpc_flow_logs ? 1 : 0
+  iam_role_arn    = aws_iam_role.flow_logs[0].arn
+  log_destination = aws_cloudwatch_log_group.flow_logs[0].arn
+  traffic_type    = "ALL"
+  vpc_id          = aws_vpc.main.id
+
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${local.name}-flow-logs"
+    }
+  )
 }

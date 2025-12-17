@@ -61,3 +61,10 @@ variable "additional_tags" {
   type        = map(string)
   default     = {}
 }
+
+
+variable "enable_vpc_flow_logs" {
+  description = "Habilita VPC Flow Logs (requer IAM/CloudWatch)."
+  type        = bool
+  default     = false
+}
