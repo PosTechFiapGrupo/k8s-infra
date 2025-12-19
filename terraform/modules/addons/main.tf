@@ -90,7 +90,7 @@ resource "aws_iam_role_policy_attachment" "cluster_autoscaler" {
 # external-secrets-operator
 # -------------------------
 resource "helm_release" "external_secrets" {
-   depends_on = [
+  depends_on = [
     helm_release.aws_load_balancer_controller
   ]
   name             = "external-secrets"
