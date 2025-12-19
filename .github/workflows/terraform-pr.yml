@@ -1,0 +1,127 @@
+name: Terraform PR
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Ensure remote backend (S3 bucket)
+        id: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # --- 1) Lê vars do terraform.tfvars; se não existir, usa terraform.tfvars.example ---
+          if [ -f terraform.tfvars ]; then
+            tfv="terraform.tfvars"
+          elif [ -f terraform.tfvars.example ]; then
+            tfv="terraform.tfvars.example"
+          else
+            echo "ERROR: neither terraform.tfvars nor terraform.tfvars.example found in $(pwd)."
+            exit 1
+          fi
+
+          get_tfvar() {
+            local key="$1"
+            # primeira ocorrência: key = "value" (ignora comentários)
+            sed -nE 's/^\s*'"$key"'\s*=\s*"([^"]+)".*$/\1/p' "$tfv" | head -n1
+          }
+
+          PROJECT_NAME="$(get_tfvar project_name)"
+          ENVIRONMENT="$(get_tfvar environment)"
+          AWS_REGION_TFV="$(get_tfvar aws_region)"
+
+          if [ -z "${PROJECT_NAME}" ] || [ -z "${ENVIRONMENT}" ] || [ -z "${AWS_REGION_TFV}" ]; then
+            echo "ERROR: Could not parse project_name/environment/aws_region from ${tfv}."
+            echo "Expected format:"
+            echo '  project_name = "..."'
+            echo '  environment  = "..."'
+            echo '  aws_region   = "..."'
+            exit 1
+          fi
+
+          # --- 2) Conta AWS p/ unicidade do bucket ---
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+
+          # --- 3) Nome determinístico (CI-friendly) ---
+          BUCKET="${PROJECT_NAME}-tfstate-${ACCOUNT_ID}-${AWS_REGION_TFV}-${ENVIRONMENT}"
+
+          echo "Resolved backend:"
+          echo "  tfvars_file=$tfv"
+          echo "  bucket=$BUCKET"
+          echo "  region=$AWS_REGION_TFV"
+
+          # --- 4) Bucket: cria se não existir ---
+          if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            echo "S3 bucket exists: $BUCKET"
+          else
+            echo "Creating S3 bucket: $BUCKET"
+            if [ "$AWS_REGION_TFV" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "$BUCKET" --region "$AWS_REGION_TFV"
+            else
+              aws s3api create-bucket \
+                --bucket "$BUCKET" \
+                --region "$AWS_REGION_TFV" \
+                --create-bucket-configuration LocationConstraint="$AWS_REGION_TFV"
+            fi
+
+            # Boas práticas (equivalente ao bootstrap)
+            aws s3api put-public-access-block --bucket "$BUCKET" --public-access-block-configuration \
+              'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
+
+            aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
+
+            aws s3api put-bucket-encryption --bucket "$BUCKET" --server-side-encryption-configuration \
+              '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+          fi
+
+          # outputs p/ próximos steps
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+          echo "region=$AWS_REGION_TFV" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform init (remote backend)
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ steps.backend.outputs.bucket }}" \
+            -backend-config="key=env/dev/terraform.tfstate" \
+            -backend-config="region=${{ steps.backend.outputs.region }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        run: terraform plan -var-file=terraform.tfvars.example -input=false -no-color

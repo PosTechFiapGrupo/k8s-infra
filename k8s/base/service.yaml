@@ -1,0 +1,80 @@
+# =============================================================================
+# Service - Tech Challenge API
+# =============================================================================
+# Este arquivo define o Service para expor a aplicação internamente e externamente
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: tech-challenge-api
+  namespace: tech-challenge
+  labels:
+    app: tech-challenge
+    component: api
+    tier: backend
+  annotations:
+    # Annotations para AWS Load Balancer Controller
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+spec:
+  type: LoadBalancer
+  selector:
+    app: tech-challenge
+    component: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      protocol: TCP
+  sessionAffinity: None
+
+---
+# =============================================================================
+# Service - Internal (ClusterIP)
+# =============================================================================
+# Service interno para comunicação entre pods
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: tech-challenge-api-internal
+  namespace: tech-challenge
+  labels:
+    app: tech-challenge
+    component: api
+    tier: backend
+spec:
+  type: ClusterIP
+  selector:
+    app: tech-challenge
+    component: api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+
+---
+# =============================================================================
+# Service - Headless (para StatefulSets se necessário)
+# =============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: tech-challenge-api-headless
+  namespace: tech-challenge
+  labels:
+    app: tech-challenge
+    component: api
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: tech-challenge
+    component: api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

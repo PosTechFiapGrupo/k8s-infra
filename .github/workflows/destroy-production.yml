@@ -1,0 +1,112 @@
+name: Destroy Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy-prod" to confirm'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Safety check
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.confirm }}" != "destroy-prod" ]; then
+            echo "Confirmation failed. You must type: destroy-prod"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Pick tfvars (prod)
+        id: tfvars
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f terraform.tfvars.prod ]; then
+            echo "file=terraform.tfvars.prod" >> "$GITHUB_OUTPUT"
+          elif [ -f terraform.tfvars ]; then
+            echo "file=terraform.tfvars" >> "$GITHUB_OUTPUT"
+          else
+            echo "ERROR: terraform.tfvars.prod (preferred) or terraform.tfvars not found."
+            exit 1
+          fi
+
+      - name: Ensure remote backend (S3 bucket only)
+        id: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tfv="${{ steps.tfvars.outputs.file }}"
+
+          get_tfvar() {
+            local key="$1"
+            sed -nE 's/^\s*'"$key"'\s*=\s*"([^"]+)".*$/\1/p' "$tfv" | head -n1
+          }
+
+          PROJECT_NAME="$(get_tfvar project_name)"
+          ENVIRONMENT="$(get_tfvar environment)"
+          AWS_REGION_TFV="$(get_tfvar aws_region)"
+
+          if [ -z "${PROJECT_NAME}" ] || [ -z "${ENVIRONMENT}" ] || [ -z "${AWS_REGION_TFV}" ]; then
+            echo "ERROR: Could not parse project_name/environment/aws_region from ${tfv}."
+            exit 1
+          fi
+
+          # trava extra: só deixa destruir se for prod/production
+          if [ "${ENVIRONMENT}" != "prod" ] && [ "${ENVIRONMENT}" != "production" ]; then
+            echo "ERROR: environment in ${tfv} is '${ENVIRONMENT}', expected 'prod' or 'production'."
+            exit 1
+          fi
+
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          BUCKET="${PROJECT_NAME}-tfstate-${ACCOUNT_ID}-${AWS_REGION_TFV}-${ENVIRONMENT}"
+
+          # Se backend não existir, não faz sentido dar destroy (não tem state)
+          if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            echo "ERROR: backend bucket does not exist: $BUCKET"
+            exit 1
+          fi
+
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+          echo "region=$AWS_REGION_TFV" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform init (remote backend)
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ steps.backend.outputs.bucket }}" \
+            -backend-config="key=env/prod/terraform.tfstate" \
+            -backend-config="region=${{ steps.backend.outputs.region }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform destroy (production)
+        run: terraform destroy -var-file=${{ steps.tfvars.outputs.file }} -input=false -auto-approve -no-color

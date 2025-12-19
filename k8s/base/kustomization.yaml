@@ -1,0 +1,29 @@
+# =============================================================================
+# Kustomization - Base
+# =============================================================================
+# Este arquivo permite usar Kustomize para gerenciar os manifestos K8s
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: tech-challenge
+
+# Recursos base
+resources:
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+# Labels comuns aplicados a todos os recursos
+labels:
+  - pairs:
+      app.kubernetes.io/name: tech-challenge
+      app.kubernetes.io/instance: tech-challenge
+      app.kubernetes.io/part-of: tech-challenge
+      app.kubernetes.io/managed-by: kustomize
+
+
+# Annotations comuns
+commonAnnotations:
+  app.kubernetes.io/version: "1.0.0"

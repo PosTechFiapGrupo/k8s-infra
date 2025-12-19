@@ -1,0 +1,157 @@
+name: Deploy Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_prod:
+        description: "Deploy em produção?"
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Safety check
+        run: |
+          if [ "${{ inputs.deploy_prod }}" != "true" ]; then
+            echo "deploy_prod=false → abortando"
+            exit 0
+          fi
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Resolve env + tfvars + state key
+        id: env
+        shell: bash
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TARGET="prod"
+          else
+            TARGET="${{ inputs.target_env }}"
+          fi
+
+          if [ "$TARGET" = "prod" ]; then
+            TFVARS="terraform.tfvars.prod"
+            STATE_KEY="env/prod/terraform.tfstate"
+          else
+            TFVARS="terraform.tfvars.staging"
+            STATE_KEY="env/staging/terraform.tfstate"
+          fi
+
+          if [ ! -f "$TFVARS" ]; then
+            echo "ERROR: $TFVARS not found in terraform/."
+            exit 1
+          fi
+
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "tfvars=$TFVARS" >> "$GITHUB_OUTPUT"
+          echo "state_key=$STATE_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure remote backend (S3 bucket)
+        id: backend
+        shell: bash
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+
+          tfv="${{ steps.env.outputs.tfvars }}"
+
+          get_tfvar() {
+            local key="$1"
+            sed -nE 's/^\s*'"$key"'\s*=\s*"([^"]+)".*$/\1/p' "$tfv" | head -n1
+          }
+
+          PROJECT_NAME="$(get_tfvar project_name)"
+          ENVIRONMENT="$(get_tfvar environment)"
+          AWS_REGION_TFV="$(get_tfvar aws_region)"
+
+          if [ -z "${PROJECT_NAME}" ] || [ -z "${ENVIRONMENT}" ] || [ -z "${AWS_REGION_TFV}" ]; then
+            echo "ERROR: Could not parse project_name/environment/aws_region from ${tfv}."
+            exit 1
+          fi
+
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          BUCKET="${PROJECT_NAME}-tfstate-${ACCOUNT_ID}-${AWS_REGION_TFV}-${ENVIRONMENT}"
+
+          if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            echo "S3 bucket exists: $BUCKET"
+          else
+            echo "Creating S3 bucket: $BUCKET"
+            if [ "$AWS_REGION_TFV" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "$BUCKET" --region "$AWS_REGION_TFV"
+            else
+              aws s3api create-bucket \
+                --bucket "$BUCKET" \
+                --region "$AWS_REGION_TFV" \
+                --create-bucket-configuration LocationConstraint="$AWS_REGION_TFV"
+            fi
+
+            aws s3api put-public-access-block --bucket "$BUCKET" --public-access-block-configuration \
+              'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
+
+            aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
+
+            aws s3api put-bucket-encryption --bucket "$BUCKET" --server-side-encryption-configuration \
+              '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+          fi
+
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+          echo "region=$AWS_REGION_TFV" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform init
+        working-directory: terraform
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ steps.backend.outputs.bucket }}" \
+            -backend-config="key=${{ steps.env.outputs.state_key }}" \
+            -backend-config="region=${{ steps.backend.outputs.region }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform apply
+        working-directory: terraform
+        run: terraform apply -var-file=${{ steps.env.outputs.tfvars }} -input=false -auto-approve -no-color
+
+      - name: Setup kubectl + kubeconfig
+        if: ${{ github.event_name == 'push' || inputs.apply_k8s == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws --version
+          kubectl version --client
+
+          # pega nome do cluster do Terraform
+          CLUSTER_NAME="$(cd terraform && terraform output -raw eks_cluster_name 2>/dev/null || true)"
+          if [ -z "${CLUSTER_NAME}" ]; then
+            echo "ERROR: Terraform output 'eks_cluster_name' not found."
+            exit 1
+          fi
+
+          aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region us-east-1
+          kubectl get nodes
+
+      - name: Apply addons
+        if: ${{ github.event_name == 'push' || inputs.apply_k8s == 'true' }}
+        run: kubectl apply -k k8s/addons
+
+      - name: Apply app
+        if: ${{ github.event_name == 'push' || inputs.apply_k8s == 'true' }}
+        run: kubectl apply -k k8s/base
