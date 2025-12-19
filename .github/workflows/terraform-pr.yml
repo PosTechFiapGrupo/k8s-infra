@@ -2,35 +2,60 @@ name: Terraform PR
 
 on:
   pull_request:
+    branches:
+      - main
+      - develop
 
 jobs:
   terraform:
     runs-on: ubuntu-latest
+
     defaults:
       run:
         working-directory: terraform
 
+    permissions:
+      contents: read
+      pull-requests: write
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
 
       - name: Terraform fmt
         run: terraform fmt -check -recursive
 
-      - name: Configure AWS Credentials
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
-      - name: Terraform init (backend S3)
+      - name: Resolve Terraform backend bucket
+        id: backend
+        run: |
+          set -e
+          if [ -n "${TF_STATE_BUCKET:-}" ]; then
+            BUCKET="$TF_STATE_BUCKET"
+          else
+            BUCKET="$(cd bootstrap && terraform output -raw terraform_state_bucket)"
+          fi
+          echo "bucket=$BUCKET" >> $GITHUB_OUTPUT
+        env:
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+
+      - name: Terraform init
         run: |
           terraform init -input=false -reconfigure \
-            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="bucket=${{ steps.backend.outputs.bucket }}" \
             -backend-config="key=env/dev/terraform.tfstate" \
             -backend-config="region=us-east-1" \
-            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}"
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
 
       - name: Terraform validate
         run: terraform validate
