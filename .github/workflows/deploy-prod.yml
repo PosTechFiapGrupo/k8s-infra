@@ -1,30 +1,13 @@
-name: Deploy
+name: Deploy Production
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
-      target_env:
-        description: "Ambiente para deploy (staging/prod)"
+      deploy_prod:
+        description: "Deploy em produção?"
         required: true
-        default: "staging"
-        type: choice
-        options:
-          - staging
-          - prod
-      apply_k8s:
-        description: "Aplicar manifests Kubernetes?"
-        required: true
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
-
-permissions:
-  contents: read
+        default: false
+        type: boolean
 
 jobs:
   deploy:
@@ -32,11 +15,16 @@ jobs:
     environment: production
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - name: Safety check
+        run: |
+          if [ "${{ inputs.deploy_prod }}" != "true" ]; then
+            echo "deploy_prod=false → abortando"
+            exit 0
+          fi
+
+      - uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
 
