@@ -79,8 +79,8 @@ resource "aws_security_group" "eks_nodes" {
   tags = merge(
     local.common_tags,
     {
-      Name                                        = "${local.name}-eks-nodes-sg"
-      Type                                        = "eks-nodes"
+      Name                                      = "${local.name}-eks-nodes-sg"
+      Type                                      = "eks-nodes"
       "kubernetes.io/cluster/${local.name}-eks" = "owned"
     }
   )

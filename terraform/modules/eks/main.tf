@@ -219,12 +219,17 @@ resource "aws_eks_node_group" "main" {
     environment = var.environment
   }
 
-  tags = merge(
-    local.common_tags,
-    {
-      Name = "${local.cluster_name}-node-group"
-    }
-  )
+tags = merge(
+  local.common_tags,
+  {
+    Name = "${local.cluster_name}-node-group"
+
+    # Cluster Autoscaler (OBRIGATÓRIO)
+    "k8s.io/cluster-autoscaler/enabled" = "true"
+    "k8s.io/cluster-autoscaler/${local.cluster_name}" = "owned"
+  }
+)
+
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_worker_node_policy,

@@ -102,14 +102,19 @@ output "kubeconfig_command" {
 output "cluster_info" {
   description = "Informações consolidadas do cluster"
   value = {
-    name                   = aws_eks_cluster.main.name
-    endpoint               = aws_eks_cluster.main.endpoint
-    version                = aws_eks_cluster.main.version
-    arn                    = aws_eks_cluster.main.arn
-    security_group_id      = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
-    oidc_provider_arn      = aws_iam_openid_connect_provider.eks.arn
+    name              = aws_eks_cluster.main.name
+    endpoint          = aws_eks_cluster.main.endpoint
+    version           = aws_eks_cluster.main.version
+    arn               = aws_eks_cluster.main.arn
+    security_group_id = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
+    oidc_provider_arn = aws_iam_openid_connect_provider.eks.arn
   }
 }
 
 # Data source para região
 data "aws_caller_identity" "output" {}
+
+output "oidc_issuer_url" {
+  description = "OIDC issuer URL do EKS (host/path sem https://) para uso em IRSA"
+  value       = replace(aws_eks_cluster.main.identity[0].oidc[0].issuer, "https://", "")
+}

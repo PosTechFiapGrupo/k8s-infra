@@ -1,0 +1,33 @@
+name: Deploy Production
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform init
+        run: terraform init
+
+      - name: Terraform apply
+        run: terraform apply
+
+      - name: Setup kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --name tech-challenge-prod-eks \
+            --region us-east-1
+
+      - name: Apply addons
+        run: kubectl apply -k k8s/addons
+
+      - name: Apply app
+        run: kubectl apply -k k8s/base

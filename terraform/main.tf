@@ -84,3 +84,18 @@ locals {
     var.additional_tags
   )
 }
+
+
+module "addons" {
+  count  = var.enable_eks ? 1 : 0
+  source = "./modules/addons"
+
+  cluster_name      = module.eks[0].cluster_name
+  region            = var.aws_region
+  vpc_id            = module.vpc.vpc_id
+  oidc_provider_arn = module.eks[0].oidc_provider_arn
+  oidc_issuer_url   = replace(module.eks[0].oidc_provider_url, "https://", "")
+
+
+  depends_on = [module.eks]
+}

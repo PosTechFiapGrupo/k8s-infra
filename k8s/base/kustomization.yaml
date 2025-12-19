@@ -10,20 +10,19 @@ namespace: tech-challenge
 
 # Recursos base
 resources:
-  - namespace.yaml
   - configmap.yaml
-  - secret.yaml
-  - serviceaccount.yaml
   - deployment.yaml
   - service.yaml
   - ingress.yaml
 
 # Labels comuns aplicados a todos os recursos
-commonLabels:
-  app.kubernetes.io/name: tech-challenge
-  app.kubernetes.io/instance: tech-challenge
-  app.kubernetes.io/part-of: tech-challenge
-  app.kubernetes.io/managed-by: kustomize
+labels:
+  - pairs:
+      app.kubernetes.io/name: tech-challenge
+      app.kubernetes.io/instance: tech-challenge
+      app.kubernetes.io/part-of: tech-challenge
+      app.kubernetes.io/managed-by: kustomize
+
 
 # Annotations comuns
 commonAnnotations:
