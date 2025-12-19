@@ -18,11 +18,11 @@ jobs:
       - name: Terraform fmt
         run: terraform fmt -check -recursive
 
-      - name: Terraform init
-        run: terraform init
+      - name: Terraform init (sem backend)
+        run: terraform init -backend=false -input=false
 
       - name: Terraform validate
         run: terraform validate
 
       - name: Terraform plan
-        run: terraform plan
+        run: terraform plan -var-file=terraform.tfvars -input=false
