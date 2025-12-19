@@ -5,26 +5,151 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: production
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Terraform init
-        run: terraform init
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
 
-      - name: Terraform apply
-        run: terraform apply
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
 
-      - name: Setup kubectl
+      # ---- Backend + init/apply no diretório terraform/ ----
+      - name: Ensure remote backend (S3 bucket)
+        id: backend
+        working-directory: terraform
+        shell: bash
         run: |
+          set -euo pipefail
+
+          # prioriza prod tfvars; senão cai no tfvars; senão example
+          if [ -f terraform.tfvars.prod ]; then
+            tfv="terraform.tfvars.prod"
+          elif [ -f terraform.tfvars ]; then
+            tfv="terraform.tfvars"
+          elif [ -f terraform.tfvars.example ]; then
+            tfv="terraform.tfvars.example"
+          else
+            echo "ERROR: no tfvars file found (terraform.tfvars.prod / terraform.tfvars / terraform.tfvars.example)."
+            exit 1
+          fi
+
+          get_tfvar() {
+            local key="$1"
+            sed -nE 's/^\s*'"$key"'\s*=\s*"([^"]+)".*$/\1/p' "$tfv" | head -n1
+          }
+
+          PROJECT_NAME="$(get_tfvar project_name)"
+          ENVIRONMENT="$(get_tfvar environment)"
+          AWS_REGION_TFV="$(get_tfvar aws_region)"
+
+          if [ -z "${PROJECT_NAME}" ] || [ -z "${ENVIRONMENT}" ] || [ -z "${AWS_REGION_TFV}" ]; then
+            echo "ERROR: Could not parse project_name/environment/aws_region from ${tfv}."
+            exit 1
+          fi
+
+          # garantia extra: produção mesmo
+          if [ "${ENVIRONMENT}" != "prod" ] && [ "${ENVIRONMENT}" != "production" ]; then
+            echo "ERROR: environment in ${tfv} is '${ENVIRONMENT}', expected 'prod' or 'production'."
+            exit 1
+          fi
+
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          BUCKET="${PROJECT_NAME}-tfstate-${ACCOUNT_ID}-${AWS_REGION_TFV}-${ENVIRONMENT}"
+
+          echo "Resolved backend:"
+          echo "  tfvars_file=$tfv"
+          echo "  bucket=$BUCKET"
+          echo "  region=$AWS_REGION_TFV"
+
+          if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            echo "S3 bucket exists: $BUCKET"
+          else
+            echo "Creating S3 bucket: $BUCKET"
+            if [ "$AWS_REGION_TFV" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "$BUCKET" --region "$AWS_REGION_TFV"
+            else
+              aws s3api create-bucket \
+                --bucket "$BUCKET" \
+                --region "$AWS_REGION_TFV" \
+                --create-bucket-configuration LocationConstraint="$AWS_REGION_TFV"
+            fi
+
+            aws s3api put-public-access-block --bucket "$BUCKET" --public-access-block-configuration \
+              'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
+
+            aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
+
+            aws s3api put-bucket-encryption --bucket "$BUCKET" --server-side-encryption-configuration \
+              '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+          fi
+
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+          echo "region=$AWS_REGION_TFV" >> "$GITHUB_OUTPUT"
+          echo "tfvars=$tfv" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform init (remote backend)
+        working-directory: terraform
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ steps.backend.outputs.bucket }}" \
+            -backend-config="key=env/prod/terraform.tfstate" \
+            -backend-config="region=${{ steps.backend.outputs.region }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform validate
+        working-directory: terraform
+        run: terraform validate
+
+      - name: Terraform plan (production)
+        working-directory: terraform
+        run: terraform plan -var-file=${{ steps.backend.outputs.tfvars }} -input=false -no-color
+
+      - name: Terraform apply (production)
+        working-directory: terraform
+        run: terraform apply -var-file=${{ steps.backend.outputs.tfvars }} -input=false -auto-approve -no-color
+
+      # ---- kubeconfig a partir de output do Terraform (sem hardcode) ----
+      - name: Setup kubectl
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws --version
+          kubectl version --client
+
+      - name: Configure kubeconfig from Terraform output
+        working-directory: terraform
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CLUSTER_NAME="$(terraform output -raw eks_cluster_name 2>/dev/null || true)"
+          if [ -z "${CLUSTER_NAME}" ]; then
+            echo "ERROR: Terraform output 'eks_cluster_name' not found. Create this output in your Terraform root outputs."
+            exit 1
+          fi
+
           aws eks update-kubeconfig \
-            --name tech-challenge-prod-eks \
-            --region us-east-1
+            --name "${CLUSTER_NAME}" \
+            --region "${{ steps.backend.outputs.region }}"
+
+          kubectl get nodes
 
       - name: Apply addons
         run: kubectl apply -k k8s/addons
