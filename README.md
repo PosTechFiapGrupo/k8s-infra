@@ -508,6 +508,109 @@ kubectl describe pod <pod-name> -n tech-challenge
 kubectl top nodes
 ```
 
+## 🔄 CI/CD – Pipelines de Infraestrutura
+
+Este repositório utiliza **GitHub Actions** para gerenciar o ciclo de vida da infraestrutura AWS/EKS com **Terraform**, garantindo segurança, previsibilidade e controle, especialmente em produção.
+
+---
+
+## Pipeline: Terraform PR
+
+### Objetivo
+Validar mudanças de infraestrutura antes do merge, garantindo **qualidade, padronização e previsibilidade**.
+
+### Gatilho
+- `pull_request` para as branches:
+  - `main`
+  - `develop`
+
+### O que a pipeline faz
+- Executa `terraform fmt` para validar formatação
+- Inicializa backend remoto no S3 (cria o bucket se necessário)
+- Valida a configuração (`terraform validate`)
+- Gera o plano de execução (`terraform plan`) sem aplicar mudanças
+
+### Benefícios
+- Evita erros em produção
+- Padroniza o código Terraform
+- Dá visibilidade clara das mudanças propostas no PR
+
+---
+
+## Pipeline: Deploy Production
+
+### Objetivo
+Realizar o **deploy completo da infraestrutura e da aplicação em produção**, de forma manual e controlada.
+
+### Gatilho
+- `workflow_dispatch`
+- Requer confirmação explícita: `deploy_prod = true`
+- Executa no environment protegido `production`
+
+### O que a pipeline faz
+- Executa um *safety check* para evitar deploy acidental
+- Resolve automaticamente o arquivo `tfvars`
+- Garante e inicializa o backend remoto no S3
+- Aplica a infraestrutura com `terraform apply`
+- Configura o `kubectl` usando outputs do Terraform
+- Aplica os manifests Kubernetes:
+  - Addons (`k8s/addons`)
+  - Aplicação (`k8s/base`)
+
+### Benefícios
+- Deploy auditável e reproduzível
+- Infraestrutura e aplicação versionadas
+- Nenhum acesso manual ao cluster
+- Redução de erro humano
+
+---
+
+## Pipeline: Destroy Production
+
+### Objetivo
+Executar a **destruição completa da infraestrutura de produção** de forma **segura e consciente**.
+
+### Gatilho
+- `workflow_dispatch`
+- Exige confirmação textual: `destroy-prod`
+- Executa no environment protegido `production`
+
+### Proteções implementadas
+- Confirmação manual obrigatória
+- Validação de que o ambiente é `prod` ou `production`
+- Verificação da existência do backend remoto
+- Execução isolada da pipeline (sem reaproveitar jobs)
+
+### O que a pipeline faz
+- Valida a confirmação de destruição
+- Seleciona o `terraform.tfvars.prod`
+- Inicializa o backend remoto existente
+- Executa `terraform destroy` com `-auto-approve`
+
+### Benefícios
+- Evita destruições acidentais
+- Processo explícito e auditável
+- Total controle sobre ações destrutivas
+
+---
+
+## 🧠 Visão Geral
+
+| Pipeline | Função |
+|--------|-------|
+| **Terraform PR** | Validação e planejamento das mudanças |
+| **Deploy Production** | Provisionamento e deploy da infra + app |
+| **Destroy Production** | Remoção completa da infra de produção |
+
+---
+
+## Boas práticas adotadas
+- Backend remoto com S3 e lock
+- Separação clara entre validação, deploy e destroy
+- Uso de environments protegidos
+- Confirmações explícitas para ações críticas
+- Infraestrutura como código versionada
+
 ---
 
 ## 🤝 Contribuição
