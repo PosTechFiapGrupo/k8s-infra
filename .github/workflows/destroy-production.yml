@@ -21,17 +21,18 @@ jobs:
         working-directory: terraform
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Safety check
         shell: bash
+        working-directory: .
         run: |
           set -euo pipefail
           if [ "${{ inputs.confirm }}" != "destroy-prod" ]; then
             echo "Confirmation failed. You must type: destroy-prod"
             exit 1
           fi
-
-      - name: Checkout
-        uses: actions/checkout@v4
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -81,7 +82,6 @@ jobs:
             exit 1
           fi
 
-          # trava extra: só deixa destruir se for prod/production
           if [ "${ENVIRONMENT}" != "prod" ] && [ "${ENVIRONMENT}" != "production" ]; then
             echo "ERROR: environment in ${tfv} is '${ENVIRONMENT}', expected 'prod' or 'production'."
             exit 1
@@ -90,7 +90,6 @@ jobs:
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           BUCKET="${PROJECT_NAME}-tfstate-${ACCOUNT_ID}-${AWS_REGION_TFV}-${ENVIRONMENT}"
 
-          # Se backend não existir, não faz sentido dar destroy (não tem state)
           if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
             echo "ERROR: backend bucket does not exist: $BUCKET"
             exit 1
