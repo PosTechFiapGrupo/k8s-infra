@@ -20,11 +20,15 @@ jobs:
       run:
         working-directory: terraform
 
+    env:
+      BACKEND_KEY: env/prod/terraform.tfstate
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Safety check
+      # Rodar fora do working-directory default (terraform)
+      - name: Safety check (manual confirmation)
         shell: bash
         working-directory: .
         run: |
@@ -33,6 +37,24 @@ jobs:
             echo "Confirmation failed. You must type: destroy-prod"
             exit 1
           fi
+
+      - name: Debug structure (repo + terraform dir)
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          echo "Repo root:"
+          ls -la
+          echo ""
+          echo "Terraform dir:"
+          if [ ! -d terraform ]; then
+            echo "ERROR: terraform/ directory not found at repo root."
+            exit 1
+          fi
+          ls -la terraform
+          echo ""
+          echo "tfvars candidates under terraform/:"
+          find terraform -maxdepth 3 -type f -name "*.tfvars*" -o -name "*.tfvars" | sed 's|^| - |' || true
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -51,21 +73,36 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f terraform.tfvars.prod ]; then
-            echo "file=terraform.tfvars.prod" >> "$GITHUB_OUTPUT"
-          elif [ -f terraform.tfvars ]; then
-            echo "file=terraform.tfvars" >> "$GITHUB_OUTPUT"
-          else
-            echo "ERROR: terraform.tfvars.prod (preferred) or terraform.tfvars not found."
-            exit 1
-          fi
 
-      - name: Ensure remote backend (S3 bucket only)
-        id: backend
+          # Estamos dentro de terraform/ por causa do defaults.run.working-directory
+          CANDIDATES=(
+            "terraform.tfvars.prod"
+            "terraform.tfvars"
+            "terraform.tfvars.example"
+            "env/prod/terraform.tfvars"
+            "env/prod/terraform.tfvars.prod"
+            "vars/prod.tfvars"
+            "vars/production.tfvars"
+          )
+
+          for f in "${CANDIDATES[@]}"; do
+            if [ -f "$f" ]; then
+              echo "Using tfvars: $f"
+              echo "file=$f" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          echo "ERROR: terraform.tfvars.prod (preferred) or other tfvars not found in terraform/."
+          echo "Searched:"
+          printf ' - %s\n' "${CANDIDATES[@]}"
+          exit 1
+
+      - name: Validate tfvars are PRODUCTION
+        id: validate
         shell: bash
         run: |
           set -euo pipefail
-
           tfv="${{ steps.tfvars.outputs.file }}"
 
           get_tfvar() {
@@ -79,19 +116,44 @@ jobs:
 
           if [ -z "${PROJECT_NAME}" ] || [ -z "${ENVIRONMENT}" ] || [ -z "${AWS_REGION_TFV}" ]; then
             echo "ERROR: Could not parse project_name/environment/aws_region from ${tfv}."
+            echo "Make sure they exist and are quoted, e.g.:"
+            echo 'project_name = "myproj"'
+            echo 'environment  = "prod"'
+            echo 'aws_region   = "us-east-1"'
             exit 1
           fi
 
+          # trava extra: só deixa destruir se for prod/production
           if [ "${ENVIRONMENT}" != "prod" ] && [ "${ENVIRONMENT}" != "production" ]; then
             echo "ERROR: environment in ${tfv} is '${ENVIRONMENT}', expected 'prod' or 'production'."
             exit 1
           fi
 
+          # aviso se cair no example (não bloqueia, mas deixa explícito no log)
+          if [[ "$tfv" == *".example" ]]; then
+            echo "WARNING: Using a .example tfvars file for production destroy. Ensure values are REAL."
+          fi
+
+          echo "project_name=$PROJECT_NAME" >> "$GITHUB_OUTPUT"
+          echo "environment=$ENVIRONMENT" >> "$GITHUB_OUTPUT"
+          echo "aws_region=$AWS_REGION_TFV" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure remote backend bucket exists (S3)
+        id: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_NAME="${{ steps.validate.outputs.project_name }}"
+          ENVIRONMENT="${{ steps.validate.outputs.environment }}"
+          AWS_REGION_TFV="${{ steps.validate.outputs.aws_region }}"
+
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           BUCKET="${PROJECT_NAME}-tfstate-${ACCOUNT_ID}-${AWS_REGION_TFV}-${ENVIRONMENT}"
 
+          echo "Checking backend bucket: $BUCKET (region: $AWS_REGION_TFV)"
           if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-            echo "ERROR: backend bucket does not exist: $BUCKET"
+            echo "ERROR: backend bucket does not exist (or no access): $BUCKET"
             exit 1
           fi
 
@@ -99,13 +161,28 @@ jobs:
           echo "region=$AWS_REGION_TFV" >> "$GITHUB_OUTPUT"
 
       - name: Terraform init (remote backend)
+        shell: bash
         run: |
+          set -euo pipefail
           terraform init -input=false -reconfigure \
             -backend-config="bucket=${{ steps.backend.outputs.bucket }}" \
-            -backend-config="key=env/prod/terraform.tfstate" \
+            -backend-config="key=${{ env.BACKEND_KEY }}" \
             -backend-config="region=${{ steps.backend.outputs.region }}" \
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true"
 
+      - name: Terraform plan (destroy preview)
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform plan -destroy \
+            -var-file="${{ steps.tfvars.outputs.file }}" \
+            -input=false -no-color
+
       - name: Terraform destroy (production)
-        run: terraform destroy -var-file=${{ steps.tfvars.outputs.file }} -input=false -auto-approve -no-color
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform destroy \
+            -var-file="${{ steps.tfvars.outputs.file }}" \
+            -input=false -auto-approve -no-color
