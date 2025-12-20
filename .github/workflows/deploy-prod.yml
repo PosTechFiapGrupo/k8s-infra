@@ -35,31 +35,34 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
-      - name: Resolve env + tfvars + state key
+      - name: Resolve tfvars + state key
         id: env
         shell: bash
         working-directory: terraform
         run: |
           set -euo pipefail
 
+          # 1) Escolhe o arquivo de variáveis (o que existe no CI)
+          if [ -f terraform.tfvars ]; then
+            TFVARS="terraform.tfvars"
+          elif [ -f terraform.tfvars.prod ]; then
+            TFVARS="terraform.tfvars.prod"
+          elif [ -f terraform.tfvars.example ]; then
+            TFVARS="terraform.tfvars.example"
+          else
+            echo "ERROR: no tfvars found (terraform.tfvars / terraform.tfvars.prod / terraform.tfvars.example)."
+            exit 1
+          fi
+
+          # 2) Se for tag (push), considera produção; se for manual, usa "prod" também (ou troque pra dev se quiser)
           if [ "${{ github.event_name }}" = "push" ]; then
             TARGET="prod"
           else
-            TARGET="${{ inputs.target_env }}"
+            TARGET="prod"
           fi
 
-          if [ "$TARGET" = "prod" ]; then
-            TFVARS="terraform.tfvars.prod"
-            STATE_KEY="env/prod/terraform.tfstate"
-          else
-            TFVARS="terraform.tfvars.staging"
-            STATE_KEY="env/staging/terraform.tfstate"
-          fi
-
-          if [ ! -f "$TFVARS" ]; then
-            echo "ERROR: $TFVARS not found in terraform/."
-            exit 1
-          fi
+          # 3) Key do state no S3 (não precisa existir antes)
+          STATE_KEY="infra/${TARGET}/terraform.tfstate"
 
           echo "target=$TARGET" >> "$GITHUB_OUTPUT"
           echo "tfvars=$TFVARS" >> "$GITHUB_OUTPUT"
