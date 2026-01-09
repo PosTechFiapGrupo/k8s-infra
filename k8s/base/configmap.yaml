@@ -1,7 +1,8 @@
 # =============================================================================
 # ConfigMap - Tech Challenge
 # =============================================================================
-# Este arquivo define as configurações não-sensíveis da aplicação
+# Configurações NÃO sensíveis da aplicação
+# Dados de banco (host, user, password, port, name) vêm do Secret
 
 apiVersion: v1
 kind: ConfigMap
@@ -12,141 +13,62 @@ metadata:
     app: tech-challenge
     component: config
 data:
+  # ---------------------------------------------------------------------------
   # Configurações da Aplicação
+  # ---------------------------------------------------------------------------
   APP_NAME: "tech-challenge"
   APP_ENV: "production"
   DEBUG: "false"
   LOG_LEVEL: "INFO"
-  
+
+  # ---------------------------------------------------------------------------
   # Configurações do Servidor
+  # ---------------------------------------------------------------------------
   HOST: "0.0.0.0"
   PORT: "8000"
   WORKERS: "4"
-  
-  # Configurações do Banco de Dados
-  # NOTA: O host será o endpoint do RDS
-  DB_HOST: "mysql.tech-challenge.svc.cluster.local"
-  DB_PORT: "3306"
-  DB_NAME: "tech_challenge"
+
+  # ---------------------------------------------------------------------------
+  # Configurações do Banco (NÃO sensíveis)
+  # OBS:
+  # - DB_HOST, DB_PORT, DB_NAME, DB_USER e DB_PASSWORD
+  #   vêm do Secret (External Secrets / Secrets Manager)
+  # ---------------------------------------------------------------------------
   DB_DRIVER: "mysql+asyncmy"
   DB_POOL_SIZE: "5"
   DB_MAX_OVERFLOW: "10"
   DB_POOL_TIMEOUT: "30"
   DB_POOL_RECYCLE: "1800"
-  
+
+  # ---------------------------------------------------------------------------
   # Configurações de Autenticação JWT
+  # ---------------------------------------------------------------------------
   ALGORITHM: "HS256"
   ACCESS_TOKEN_EXPIRE_MINUTES: "1440"
-  
+
+  # ---------------------------------------------------------------------------
   # Configurações de CORS
+  # ---------------------------------------------------------------------------
   CORS_ORIGINS: "*"
   CORS_ALLOW_CREDENTIALS: "true"
   CORS_ALLOW_METHODS: "GET,POST,PUT,DELETE,OPTIONS,PATCH"
   CORS_ALLOW_HEADERS: "*"
-  
+
+  # ---------------------------------------------------------------------------
   # Configurações de Rate Limiting
+  # ---------------------------------------------------------------------------
   RATE_LIMIT_ENABLED: "true"
   RATE_LIMIT_REQUESTS: "100"
   RATE_LIMIT_WINDOW_SECONDS: "60"
-  
-  # Configurações de Timezone
+
+  # ---------------------------------------------------------------------------
+  # Timezone
+  # ---------------------------------------------------------------------------
   TZ: "America/Sao_Paulo"
-  
-  # Configurações de Tracing/Observability
+
+  # ---------------------------------------------------------------------------
+  # Observabilidade / Tracing
+  # ---------------------------------------------------------------------------
   OTEL_ENABLED: "false"
   OTEL_SERVICE_NAME: "tech-challenge-api"
   OTEL_EXPORTER_OTLP_ENDPOINT: ""
-
----
-# =============================================================================
-# ConfigMap - Nginx (se necessário para proxy reverso)
-# =============================================================================
-
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: nginx-config
-  namespace: tech-challenge
-  labels:
-    app: tech-challenge
-    component: nginx
-data:
-  nginx.conf: |
-    upstream api {
-        server tech-challenge-api-internal:8000;
-    }
-
-    server {
-        listen 80;
-        server_name _;
-
-        location /health {
-            return 200 'OK';
-            add_header Content-Type text/plain;
-        }
-
-        location / {
-            proxy_pass http://api;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_connect_timeout 60s;
-            proxy_send_timeout 60s;
-            proxy_read_timeout 60s;
-        }
-    }
-
----
-# =============================================================================
-# ConfigMap - Alembic (Migrations)
-# =============================================================================
-
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: alembic-config
-  namespace: tech-challenge
-  labels:
-    app: tech-challenge
-    component: migrations
-data:
-  alembic.ini: |
-    [alembic]
-    script_location = migrations
-    prepend_sys_path = .
-    version_path_separator = os
-
-    [loggers]
-    keys = root,sqlalchemy,alembic
-
-    [handlers]
-    keys = console
-
-    [formatters]
-    keys = generic
-
-    [logger_root]
-    level = WARN
-    handlers = console
-    qualname =
-
-    [logger_sqlalchemy]
-    level = WARN
-    handlers =
-    qualname = sqlalchemy.engine
-
-    [logger_alembic]
-    level = INFO
-    handlers =
-    qualname = alembic
-
-    [handler_console]
-    class = StreamHandler
-    args = (sys.stderr,)
-    level = NOTSET
-    formatter = generic
-
-    [formatter_generic]
-    format = %(levelname)-5.5s [%(name)s] %(message)s
-    datefmt = %H:%M:%S
