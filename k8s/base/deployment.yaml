@@ -72,13 +72,13 @@ spec:
           env:
             - name: DB_HOST
               valueFrom:
-                configMapKeyRef:
-                  name: tech-challenge-config
+                secretKeyRef:
+                  name: tech-challenge-db
                   key: DB_HOST
             - name: DB_PORT
               valueFrom:
-                configMapKeyRef:
-                  name: tech-challenge-config
+                secretKeyRef:
+                  name: tech-challenge-db
                   key: DB_PORT
           securityContext:
             allowPrivilegeEscalation: false
@@ -103,7 +103,7 @@ spec:
             - configMapRef:
                 name: tech-challenge-config
             - secretRef:
-                name: tech-challenge-secrets
+                name: tech-challenge-db
           
           # Variáveis de ambiente adicionais
           env:

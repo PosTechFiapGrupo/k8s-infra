@@ -266,14 +266,77 @@ eks_node_min_size       = 1
 eks_node_max_size       = 4
 ```
 
-### 3. Crie o Backend Remoto (primeira vez)
+## 3. Crie o Backend Remoto (primeira vez)
+
+> ⚠️ **Importante**: o bootstrap **deve ser executado com um state separado por ambiente**
+> (ex.: `dev`, `staging`, `prod`).
+> **Nunca** aplique `terraform.tfvars.prod` em um state já criado como `dev`.
+
+---
+
+### Passo 1 — Acesse o diretório do bootstrap
 
 ```bash
 cd terraform/bootstrap
+```
+
+---
+
+### Passo 2 — Inicialize o Terraform
+
+```bash
 terraform init
+```
+
+---
+
+### Passo 3 — Crie e selecione o workspace do ambiente
+
+Exemplo para **dev**:
+
+```bash
+terraform workspace new dev || terraform workspace select dev
+```
+
+Exemplo para **prod**:
+
+```bash
+terraform workspace new prod || terraform workspace select prod
+```
+
+---
+
+### Passo 4 — Aplique o bootstrap com o tfvars correto
+
+Para **dev**:
+
+```bash
 terraform apply -var-file=../terraform.tfvars
+```
+
+Para **prod**:
+
+```bash
+terraform apply -var-file=../terraform.tfvars.prod
+```
+
+---
+
+### Passo 5 — Obtenha o nome do bucket de state
+
+```bash
 terraform output -raw state_bucket_name
 ```
+
+---
+
+## 📌 Observações importantes
+
+- O **nome do bucket S3 e da tabela DynamoDB inclui o ambiente** (`dev`, `prod`, etc.).
+- O bucket de state possui `lifecycle.prevent_destroy = true` para evitar perda de estado.
+- Trocar o ambiente no **mesmo state** causará erro de destruição.
+- O uso de **Terraform Workspaces** evita destruição acidental do backend.
+- O `terraform.tfvars.*` usado no bootstrap deve conter **somente variáveis necessárias ao bootstrap**.
 
 ---
 
@@ -284,9 +347,9 @@ terraform output -raw state_bucket_name
 ```bash
 cd ../
 
-BUCKET="$(cd bootstrap && terraform output -raw terraform_state_bucket)"
+BUCKET="$(cd bootstrap && terraform output -raw state_bucket_name)"
 REGION="us-east-1"
-NS="grupo19"   # use um namespace diferente por pessoa (ex: rian, emerson, grupo19)
+NS="grupo19"   # use um namespace diferente por pessoa (ex: grupo19)
 
 # Inicializar
 terraform init -reconfigure \
@@ -298,10 +361,10 @@ terraform init -reconfigure \
 
 
 # Visualizar mudanças
-terraform plan -var-file=terraform.tfvars
+terraform plan -var-file=terraform.tfvars.prod
 
 # Aplicar infraestrutura
-terraform apply -var-file=terraform.tfvars
+terraform apply -var-file=terraform.tfvars.prod
 ```
 
 ### Deploy por Módulo
@@ -337,11 +400,12 @@ Após o deploy do EKS, configure o acesso ao cluster:
 
 ```bash
 # Obter o nome do cluster do output do Terraform
-terraform output eks_cluster_name
+EKS_CLUSTER_NAME="$(terraform output -raw eks_cluster_name)"
+
 
 # Configurar kubeconfig
 aws eks update-kubeconfig \
-  --name tech-challenge-dev-eks \
+  --name "$EKS_CLUSTER_NAME" \
   --region us-east-1
 ```
 
@@ -406,9 +470,23 @@ Os manifestos base estão em `k8s/base/`:
 
 ### Aplicar Manifestos
 
+### Configurar Secrets
+
+```bash
+cd ../
+
+ROLE_ARN="$(cd terraform && terraform output -raw secrets_manager_role_arn)"
+
+sed -i "s|__EXTERNAL_SECRETS_ROLE_ARN__|${ROLE_ARN}|g" k8s/addons/serviceaccount.yaml
+
+
+kubectl apply -k k8s/addons
+
+```
+
 ```bash
 # Aplicar todos os manifestos
-kubectl apply -f k8s/base/
+kubectl apply -k k8s/base/
 
 # Ou individualmente
 kubectl apply -f k8s/base/namespace.yaml
@@ -418,19 +496,7 @@ kubectl apply -f k8s/base/deployment.yaml
 kubectl apply -f k8s/base/service.yaml
 ```
 
-### Configurar Secrets
 
-```bash
-# Criar secret com valores reais
-kubectl create secret generic tech-challenge-secrets \
-  --namespace=tech-challenge \
-  --from-literal=DB_USER=tech_user \
-  --from-literal=DB_PASSWORD=sua_senha_segura \
-  --from-literal=SECRET_KEY=seu_jwt_secret
-
-# Ou editar o arquivo e aplicar
-kubectl apply -f k8s/base/secret.yaml
-```
 
 ---
 

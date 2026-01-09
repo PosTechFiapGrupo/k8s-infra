@@ -118,3 +118,8 @@ output "oidc_issuer_url" {
   description = "OIDC issuer URL do EKS (host/path sem https://) para uso em IRSA"
   value       = replace(aws_eks_cluster.main.identity[0].oidc[0].issuer, "https://", "")
 }
+
+output "external_secrets_role_arn" {
+  value       = aws_iam_role.secrets_manager.arn
+  description = "Role ARN IRSA para o ServiceAccount external-secrets no namespace tech-challenge."
+}

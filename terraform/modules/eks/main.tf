@@ -23,7 +23,31 @@ locals {
 # Data Sources
 # =============================================================================
 
+data "aws_region" "current" {}
+
 data "aws_caller_identity" "current" {}
+data "aws_iam_policy_document" "secrets_manager_policy" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:DescribeSecret"
+    ]
+    resources = [
+      "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:tech-challenge/rds/mysql/*"
+    ]
+  }
+}
+
+resource "aws_iam_policy" "secrets_manager_policy" {
+  name   = "${local.cluster_name}-secrets-manager-read"
+  policy = data.aws_iam_policy_document.secrets_manager_policy.json
+}
+
+resource "aws_iam_role_policy_attachment" "secrets_manager_attach" {
+  role       = aws_iam_role.secrets_manager.name
+  policy_arn = aws_iam_policy.secrets_manager_policy.arn
+}
 
 data "aws_partition" "current" {}
 
@@ -315,7 +339,8 @@ resource "aws_iam_role" "secrets_manager" {
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
           StringEquals = {
-            "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:sub" = "system:serviceaccount:tech-challenge:app-service-account"
+            "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:sub" = "system:serviceaccount:tech-challenge:external-secrets"
+            "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:aud" = "sts.amazonaws.com"
           }
         }
       }
@@ -325,24 +350,6 @@ resource "aws_iam_role" "secrets_manager" {
   tags = local.common_tags
 }
 
-resource "aws_iam_role_policy" "secrets_manager" {
-  name = "${local.cluster_name}-secrets-manager-policy"
-  role = aws_iam_role.secrets_manager.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:GetSecretValue",
-          "secretsmanager:DescribeSecret"
-        ]
-        Resource = "arn:aws:secretsmanager:*:${data.aws_caller_identity.current.account_id}:secret:${var.project_name}/*"
-      }
-    ]
-  })
-}
 
 # =============================================================================
 # EKS Addons
