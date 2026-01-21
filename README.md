@@ -387,7 +387,7 @@ terraform apply -target=module.eks
 terraform plan -destroy -var-file=terraform.tfvars
 
 # Destruir tudo
-terraform destroy -var-file=terraform.tfvars
+terraform destroy -var-file=terraform.tfvars.prod
 ```
 
 ---
