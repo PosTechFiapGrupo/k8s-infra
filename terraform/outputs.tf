@@ -165,6 +165,21 @@ output "internet_gateway_id" {
   value       = module.vpc.internet_gateway_id
 }
 
+output "eks_nodes_sg_id" {
+  description = "ID do SG dos EKS Worker Nodes"
+  value       = module.security_groups.eks_nodes_sg_id
+}
+
+output "rds_mysql_sg_id" {
+  description = "ID do SG do RDS MySQL (criado no módulo security-groups)"
+  value       = module.security_groups.rds_mysql_sg_id
+}
+
+output "cluster_security_group_id" {
+  description = "SG do EKS (pode ser lista)"
+  value       = [for m in module.eks : m.cluster_security_group_id]
+}
+
 # =============================================================================
 # Comandos Úteis
 # =============================================================================
