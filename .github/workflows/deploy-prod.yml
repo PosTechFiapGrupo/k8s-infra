@@ -1,29 +1,26 @@
-name: Deploy Production
+name: Plan/Deploy Production (infra-k8s)
 
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: "Escolha a ação: plan (somente) ou apply (deploy)"
+        description: "O que executar?"
         required: true
         default: "plan"
         type: choice
         options:
           - plan
-          - apply
-
+          - deploy
       deploy_prod:
-        description: "Confirma deploy em produção? (só usado quando action=apply)"
+        description: "Confirma deploy em produção? (obrigatório para 'deploy')"
         required: true
         default: false
         type: boolean
-
       apply_k8s:
-        description: "Aplicar manifests Kubernetes (addons)? (só quando action=apply)"
+        description: "Aplicar manifests Kubernetes (addons + base)? (apenas deploy)"
         required: true
         default: true
         type: boolean
-
       ns:
         description: "Namespace/pessoa (ex: grupo19)"
         required: true
@@ -31,7 +28,7 @@ on:
         type: string
 
 jobs:
-  deploy:
+  prod:
     runs-on: ubuntu-latest
     environment: production
 
@@ -44,15 +41,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Só bloqueia quando for APPLY
-      - name: Safety check (apply only)
+      - name: Safety check (deploy)
+        if: ${{ inputs.action == 'deploy' }}
         shell: bash
         run: |
-          set -euo pipefail
-          echo "action=${{ inputs.action }}"
-          if [ "${{ inputs.action }}" = "apply" ] && [ "${{ inputs.deploy_prod }}" != "true" ]; then
-            echo "deploy_prod=false e action=apply → abortando"
-            exit 1
+          if [ "${{ inputs.deploy_prod }}" != "true" ]; then
+            echo "deploy_prod=false → abortando deploy"
+            exit 0
           fi
 
       - uses: hashicorp/setup-terraform@v3
@@ -119,28 +114,45 @@ jobs:
           terraform workspace select "${{ steps.env.outputs.environment }}" \
             || terraform workspace new "${{ steps.env.outputs.environment }}"
 
-      - name: Read backend (bucket + lock table) from bootstrap outputs (with fallback)
+      - name: Read backend (bucket + lock table) from bootstrap outputs (robust)
         id: backend
         shell: bash
         working-directory: terraform/bootstrap
         run: |
           set -euo pipefail
 
-          BUCKET="$(terraform output -raw state_bucket_name)"
+          # garante jq (ubuntu-latest geralmente já tem)
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y jq
+          fi
+
+          # pega outputs em JSON (não captura warnings)
+          OUT_JSON="$(terraform output -json 2>/dev/null || true)"
+
+          BUCKET="$(echo "${OUT_JSON}" | jq -r '.state_bucket_name.value // empty')"
           if [ -z "${BUCKET}" ]; then
-            echo "ERROR: bootstrap output state_bucket_name is empty."
+            echo "ERROR: bootstrap sem outputs. Prováveis causas:"
+            echo "  - você não rodou terraform apply no bootstrap (neste workspace)"
+            echo "  - workspace selecionado não é o mesmo do environment (ex: prod)"
+            echo ""
+            echo "Como corrigir (local/CI):"
+            echo "  terraform -chdir=terraform/bootstrap init"
+            echo "  terraform -chdir=terraform/bootstrap workspace select prod || terraform -chdir=terraform/bootstrap workspace new prod"
+            echo "  terraform -chdir=terraform/bootstrap apply -var-file=../terraform.tfvars.prod"
             exit 1
           fi
 
-          # tenta pegar lock table via output; se não existir, fallback no padrão
-          LOCK_TABLE="$(terraform output -raw dynamodb_table_name 2>/dev/null || true)"
+          LOCK_TABLE="$(echo "${OUT_JSON}" | jq -r '.dynamodb_table_name.value // empty')"
           if [ -z "${LOCK_TABLE}" ]; then
             ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
             LOCK_TABLE="${{ steps.env.outputs.project_name }}-terraform-locks-${ACCOUNT_ID}-${{ steps.env.outputs.aws_region }}-${{ steps.env.outputs.environment }}"
           fi
 
-          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
-          echo "lock_table=$LOCK_TABLE" >> "$GITHUB_OUTPUT"
+          {
+            echo "bucket=${BUCKET}"
+            echo "lock_table=${LOCK_TABLE}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Terraform init (remote backend)
         shell: bash
@@ -156,6 +168,7 @@ jobs:
             -backend-config="use_lockfile=true"
 
       - name: Terraform validate
+        shell: bash
         working-directory: terraform
         run: terraform validate -no-color
 
@@ -181,21 +194,26 @@ jobs:
             terraform/tfplan
             terraform/tfplan.txt
 
-      # Só aplica quando action=apply
-      - name: Terraform apply
-        if: ${{ inputs.action == 'apply' }}
+      - name: Terraform apply (deploy)
+        if: ${{ inputs.action == 'deploy' }}
         shell: bash
         working-directory: terraform
-        run: terraform apply -var-file="${{ steps.env.outputs.tfvars }}" -input=false -auto-approve -no-color
+        run: |
+          set -euo pipefail
+          terraform apply \
+            -var-file="${{ steps.env.outputs.tfvars }}" \
+            -input=false \
+            -auto-approve \
+            -no-color
 
       - name: Install kubectl
-        if: ${{ inputs.action == 'apply' && inputs.apply_k8s == true }}
+        if: ${{ inputs.action == 'deploy' && inputs.apply_k8s == true }}
         uses: azure/setup-kubectl@v4
         with:
           version: latest
 
       - name: Setup kubeconfig
-        if: ${{ inputs.action == 'apply' && inputs.apply_k8s == true }}
+        if: ${{ inputs.action == 'deploy' && inputs.apply_k8s == true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -208,5 +226,9 @@ jobs:
           kubectl get nodes
 
       - name: Apply addons
-        if: ${{ inputs.action == 'apply' && inputs.apply_k8s == true }}
+        if: ${{ inputs.action == 'deploy' && inputs.apply_k8s == true }}
         run: kubectl apply -k k8s/addons
+
+      - name: Apply app (base)
+        if: ${{ inputs.action == 'deploy' && inputs.apply_k8s == true }}
+        run: kubectl apply -k k8s/base
