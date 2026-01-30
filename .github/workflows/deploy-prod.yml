@@ -3,16 +3,27 @@ name: Deploy Production
 on:
   workflow_dispatch:
     inputs:
+      action:
+        description: "Escolha a ação: plan (somente) ou apply (deploy)"
+        required: true
+        default: "plan"
+        type: choice
+        options:
+          - plan
+          - apply
+
       deploy_prod:
-        description: "Deploy em produção?"
+        description: "Confirma deploy em produção? (só usado quando action=apply)"
         required: true
         default: false
         type: boolean
+
       apply_k8s:
-        description: "Aplicar manifests Kubernetes (addons + base)?"
+        description: "Aplicar manifests Kubernetes (addons)? (só quando action=apply)"
         required: true
         default: true
         type: boolean
+
       ns:
         description: "Namespace/pessoa (ex: grupo19)"
         required: true
@@ -33,12 +44,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Safety check
+      # Só bloqueia quando for APPLY
+      - name: Safety check (apply only)
         shell: bash
         run: |
-          if [ "${{ inputs.deploy_prod }}" != "true" ]; then
-            echo "deploy_prod=false → abortando"
-            exit 0
+          set -euo pipefail
+          echo "action=${{ inputs.action }}"
+          if [ "${{ inputs.action }}" = "apply" ] && [ "${{ inputs.deploy_prod }}" != "true" ]; then
+            echo "deploy_prod=false e action=apply → abortando"
+            exit 1
           fi
 
       - uses: hashicorp/setup-terraform@v3
@@ -141,24 +155,47 @@ jobs:
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true"
 
-      - name: Terraform plan (log/auditoria)
+      - name: Terraform validate
+        working-directory: terraform
+        run: terraform validate -no-color
+
+      - name: Terraform plan (gera arquivo + texto)
+        id: plan
         shell: bash
         working-directory: terraform
-        run: terraform plan -var-file="${{ steps.env.outputs.tfvars }}" -input=false -no-color
+        run: |
+          set -euo pipefail
+          terraform plan \
+            -var-file="${{ steps.env.outputs.tfvars }}" \
+            -input=false \
+            -no-color \
+            -out=tfplan
 
+          terraform show -no-color tfplan > tfplan.txt
+
+      - name: Upload plan artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ steps.env.outputs.environment }}-${{ steps.env.outputs.ns }}-${{ env.REPO }}
+          path: |
+            terraform/tfplan
+            terraform/tfplan.txt
+
+      # Só aplica quando action=apply
       - name: Terraform apply
+        if: ${{ inputs.action == 'apply' }}
         shell: bash
         working-directory: terraform
         run: terraform apply -var-file="${{ steps.env.outputs.tfvars }}" -input=false -auto-approve -no-color
 
       - name: Install kubectl
-        if: ${{ inputs.apply_k8s == true }}
+        if: ${{ inputs.action == 'apply' && inputs.apply_k8s == true }}
         uses: azure/setup-kubectl@v4
         with:
           version: latest
 
       - name: Setup kubeconfig
-        if: ${{ inputs.apply_k8s == true }}
+        if: ${{ inputs.action == 'apply' && inputs.apply_k8s == true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -171,5 +208,5 @@ jobs:
           kubectl get nodes
 
       - name: Apply addons
-        if: ${{ inputs.apply_k8s == true }}
+        if: ${{ inputs.action == 'apply' && inputs.apply_k8s == true }}
         run: kubectl apply -k k8s/addons
