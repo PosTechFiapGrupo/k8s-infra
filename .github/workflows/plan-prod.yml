@@ -1,0 +1,147 @@
+name: Plan Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      ns:
+        description: "Namespace/pessoa (ex: grupo19)"
+        required: true
+        default: "grupo19"
+        type: string
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    environment: production
+
+    env:
+      TF_DIR: terraform
+      BOOTSTRAP_DIR: terraform/bootstrap
+      STATE_PREFIX: state
+      REPO: infra-k8s
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Resolve tfvars + env/region/project + state key
+        id: env
+        shell: bash
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+
+          if [ -f terraform.tfvars.prod ]; then
+            TFVARS="terraform.tfvars.prod"
+          elif [ -f terraform.tfvars ]; then
+            TFVARS="terraform.tfvars"
+          elif [ -f terraform.tfvars.example ]; then
+            TFVARS="terraform.tfvars.example"
+          else
+            echo "ERROR: no tfvars found (terraform.tfvars.prod / terraform.tfvars / terraform.tfvars.example)."
+            exit 1
+          fi
+
+          get_tfvar() {
+            local key="$1"
+            sed -nE 's/^\s*'"$key"'\s*=\s*"([^"]+)".*$/\1/p' "$TFVARS" | head -n1
+          }
+
+          PROJECT_NAME="$(get_tfvar project_name)"
+          ENVIRONMENT="$(get_tfvar environment)"
+          AWS_REGION_TFV="$(get_tfvar aws_region)"
+
+          if [ -z "${PROJECT_NAME}" ] || [ -z "${ENVIRONMENT}" ] || [ -z "${AWS_REGION_TFV}" ]; then
+            echo "ERROR: Could not parse project_name/environment/aws_region from ${TFVARS}."
+            exit 1
+          fi
+
+          NS="${{ inputs.ns }}"
+          STATE_KEY="${{ env.STATE_PREFIX }}/${{ env.REPO }}/${ENVIRONMENT}/${NS}/terraform.tfstate"
+
+          echo "tfvars=$TFVARS" >> "$GITHUB_OUTPUT"
+          echo "project_name=$PROJECT_NAME" >> "$GITHUB_OUTPUT"
+          echo "environment=$ENVIRONMENT" >> "$GITHUB_OUTPUT"
+          echo "aws_region=$AWS_REGION_TFV" >> "$GITHUB_OUTPUT"
+          echo "ns=$NS" >> "$GITHUB_OUTPUT"
+          echo "state_key=$STATE_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Bootstrap init + select workspace
+        shell: bash
+        working-directory: terraform/bootstrap
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color
+          terraform workspace select "${{ steps.env.outputs.environment }}" \
+            || terraform workspace new "${{ steps.env.outputs.environment }}"
+
+      - name: Read backend (bucket + lock table) from bootstrap outputs (with fallback)
+        id: backend
+        shell: bash
+        working-directory: terraform/bootstrap
+        run: |
+          set -euo pipefail
+
+          BUCKET="$(terraform output -raw state_bucket_name)"
+          if [ -z "${BUCKET}" ]; then
+            echo "ERROR: bootstrap output state_bucket_name is empty."
+            exit 1
+          fi
+
+          LOCK_TABLE="$(terraform output -raw dynamodb_table_name 2>/dev/null || true)"
+          if [ -z "${LOCK_TABLE}" ]; then
+            ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+            LOCK_TABLE="${{ steps.env.outputs.project_name }}-terraform-locks-${ACCOUNT_ID}-${{ steps.env.outputs.aws_region }}-${{ steps.env.outputs.environment }}"
+          fi
+
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+          echo "lock_table=$LOCK_TABLE" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform init (remote backend)
+        shell: bash
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ steps.backend.outputs.bucket }}" \
+            -backend-config="key=${{ steps.env.outputs.state_key }}" \
+            -backend-config="region=${{ steps.env.outputs.aws_region }}" \
+            -backend-config="dynamodb_table=${{ steps.backend.outputs.lock_table }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform validate
+        working-directory: terraform
+        run: terraform validate -no-color
+
+      - name: Terraform plan (gera arquivo + texto)
+        id: plan
+        shell: bash
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          terraform plan \
+            -var-file="${{ steps.env.outputs.tfvars }}" \
+            -input=false \
+            -no-color \
+            -out=tfplan
+
+          terraform show -no-color tfplan > tfplan.txt
+
+      - name: Upload plan artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ steps.env.outputs.environment }}-${{ steps.env.outputs.ns }}-${{ env.REPO }}
+          path: |
+            terraform/tfplan
+            terraform/tfplan.txt
