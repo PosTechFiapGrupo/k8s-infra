@@ -34,7 +34,6 @@ jobs:
 
     env:
       TF_DIR: terraform
-      BOOTSTRAP_DIR: terraform/bootstrap
       STATE_PREFIX: state
       REPO: infra-k8s
 
@@ -80,7 +79,7 @@ jobs:
             exit 1
           fi
 
-          # extrai project/env/region do tfvars (aceita string com aspas)
+          # extrai project/env/region do tfvars
           get_tfvar() {
             local key="$1"
             sed -nE 's/^\s*'"$key"'\s*=\s*"([^"]+)".*$/\1/p' "$TFVARS" | head -n1
@@ -105,49 +104,37 @@ jobs:
           echo "ns=$NS" >> "$GITHUB_OUTPUT"
           echo "state_key=$STATE_KEY" >> "$GITHUB_OUTPUT"
 
-      - name: Bootstrap init + select workspace
-        shell: bash
-        working-directory: terraform/bootstrap
-        run: |
-          set -euo pipefail
-          terraform init -input=false -no-color
-          terraform workspace select "${{ steps.env.outputs.environment }}" \
-            || terraform workspace new "${{ steps.env.outputs.environment }}"
-
-      - name: Read backend (bucket + lock table) from bootstrap outputs (robust)
+      - name: Discover backend (bucket + lock table) via AWS (no bootstrap state needed)
         id: backend
         shell: bash
-        working-directory: terraform/bootstrap
         run: |
           set -euo pipefail
 
-          # garante jq (ubuntu-latest geralmente já tem)
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y jq
-          fi
+          PROJECT="${{ steps.env.outputs.project_name }}"
+          ENVIRONMENT="${{ steps.env.outputs.environment }}"
+          REGION="${{ steps.env.outputs.aws_region }}"
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 
-          # pega outputs em JSON (não captura warnings)
-          OUT_JSON="$(terraform output -json 2>/dev/null || true)"
+          # seu padrão real tem sufixo aleatório:
+          # tech-challenge-tfstate-<account>-<region>-<env>-<suffix>
+          PREFIX="${PROJECT}-tfstate-${ACCOUNT_ID}-${REGION}-${ENVIRONMENT}-"
 
-          BUCKET="$(echo "${OUT_JSON}" | jq -r '.state_bucket_name.value // empty')"
-          if [ -z "${BUCKET}" ]; then
-            echo "ERROR: bootstrap sem outputs. Prováveis causas:"
-            echo "  - você não rodou terraform apply no bootstrap (neste workspace)"
-            echo "  - workspace selecionado não é o mesmo do environment (ex: prod)"
+          BUCKET="$(aws s3api list-buckets \
+            --query "Buckets[?starts_with(Name, \`${PREFIX}\`)].Name | sort(@) | [-1]" \
+            --output text)"
+
+          if [ -z "${BUCKET}" ] || [ "${BUCKET}" = "None" ]; then
+            echo "ERROR: Não achei bucket de state com prefixo: ${PREFIX}"
+            echo "Buckets existentes com prefixo próximo:"
+            aws s3api list-buckets --query "Buckets[].Name" --output text | tr '\t' '\n' | grep -E "${PROJECT}-tfstate-${ACCOUNT_ID}-${REGION}-${ENVIRONMENT}" || true
             echo ""
-            echo "Como corrigir (local/CI):"
-            echo "  terraform -chdir=terraform/bootstrap init"
-            echo "  terraform -chdir=terraform/bootstrap workspace select prod || terraform -chdir=terraform/bootstrap workspace new prod"
-            echo "  terraform -chdir=terraform/bootstrap apply -var-file=../terraform.tfvars.prod"
+            echo "Opções:"
+            echo "  1) Rodar o bootstrap uma vez (local) e garantir que criou bucket"
+            echo "  2) Remover sufixo aleatório no bootstrap (bucket determinístico) e recriar"
             exit 1
           fi
 
-          LOCK_TABLE="$(echo "${OUT_JSON}" | jq -r '.dynamodb_table_name.value // empty')"
-          if [ -z "${LOCK_TABLE}" ]; then
-            ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-            LOCK_TABLE="${{ steps.env.outputs.project_name }}-terraform-locks-${ACCOUNT_ID}-${{ steps.env.outputs.aws_region }}-${{ steps.env.outputs.environment }}"
-          fi
+          LOCK_TABLE="${PROJECT}-terraform-locks-${ACCOUNT_ID}-${REGION}-${ENVIRONMENT}"
 
           {
             echo "bucket=${BUCKET}"
@@ -228,7 +215,3 @@ jobs:
       - name: Apply addons
         if: ${{ inputs.action == 'deploy' && inputs.apply_k8s == true }}
         run: kubectl apply -k k8s/addons
-
-      - name: Apply app (base)
-        if: ${{ inputs.action == 'deploy' && inputs.apply_k8s == true }}
-        run: kubectl apply -k k8s/base
