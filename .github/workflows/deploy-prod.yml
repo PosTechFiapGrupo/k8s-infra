@@ -8,16 +8,33 @@ on:
         required: true
         default: false
         type: boolean
+      apply_k8s:
+        description: "Aplicar manifests Kubernetes (addons + base)?"
+        required: true
+        default: true
+        type: boolean
+      ns:
+        description: "Namespace/pessoa (ex: grupo19)"
+        required: true
+        default: "grupo19"
+        type: string
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: production
 
+    env:
+      TF_DIR: terraform
+      BOOTSTRAP_DIR: terraform/bootstrap
+      STATE_PREFIX: state
+      REPO: infra-k8s
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Safety check
+        shell: bash
         run: |
           if [ "${{ inputs.deploy_prod }}" != "true" ]; then
             echo "deploy_prod=false → abortando"
@@ -35,51 +52,29 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
-      - name: Resolve tfvars + state key
+      - name: Resolve tfvars + env/region/project + state key
         id: env
         shell: bash
         working-directory: terraform
         run: |
           set -euo pipefail
 
-          # 1) Escolhe o arquivo de variáveis (o que existe no CI)
-          if [ -f terraform.tfvars ]; then
-            TFVARS="terraform.tfvars"
-          elif [ -f terraform.tfvars.prod ]; then
+          # escolhe tfvars existente
+          if [ -f terraform.tfvars.prod ]; then
             TFVARS="terraform.tfvars.prod"
+          elif [ -f terraform.tfvars ]; then
+            TFVARS="terraform.tfvars"
           elif [ -f terraform.tfvars.example ]; then
             TFVARS="terraform.tfvars.example"
           else
-            echo "ERROR: no tfvars found (terraform.tfvars / terraform.tfvars.prod / terraform.tfvars.example)."
+            echo "ERROR: no tfvars found (terraform.tfvars.prod / terraform.tfvars / terraform.tfvars.example)."
             exit 1
           fi
 
-          # 2) Se for tag (push), considera produção; se for manual, usa "prod" também (ou troque pra dev se quiser)
-          if [ "${{ github.event_name }}" = "push" ]; then
-            TARGET="prod"
-          else
-            TARGET="prod"
-          fi
-
-          # 3) Key do state no S3 (não precisa existir antes)
-          STATE_KEY="infra/${TARGET}/terraform.tfstate"
-
-          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
-          echo "tfvars=$TFVARS" >> "$GITHUB_OUTPUT"
-          echo "state_key=$STATE_KEY" >> "$GITHUB_OUTPUT"
-
-      - name: Ensure remote backend (S3 bucket)
-        id: backend
-        shell: bash
-        working-directory: terraform
-        run: |
-          set -euo pipefail
-
-          tfv="${{ steps.env.outputs.tfvars }}"
-
+          # extrai project/env/region do tfvars (aceita string com aspas)
           get_tfvar() {
             local key="$1"
-            sed -nE 's/^\s*'"$key"'\s*=\s*"([^"]+)".*$/\1/p' "$tfv" | head -n1
+            sed -nE 's/^\s*'"$key"'\s*=\s*"([^"]+)".*$/\1/p' "$TFVARS" | head -n1
           }
 
           PROJECT_NAME="$(get_tfvar project_name)"
@@ -87,74 +82,94 @@ jobs:
           AWS_REGION_TFV="$(get_tfvar aws_region)"
 
           if [ -z "${PROJECT_NAME}" ] || [ -z "${ENVIRONMENT}" ] || [ -z "${AWS_REGION_TFV}" ]; then
-            echo "ERROR: Could not parse project_name/environment/aws_region from ${tfv}."
+            echo "ERROR: Could not parse project_name/environment/aws_region from ${TFVARS}."
             exit 1
           fi
 
-          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          BUCKET="${PROJECT_NAME}-tfstate-${ACCOUNT_ID}-${AWS_REGION_TFV}-${ENVIRONMENT}"
+          NS="${{ inputs.ns }}"
+          STATE_KEY="${{ env.STATE_PREFIX }}/${{ env.REPO }}/${ENVIRONMENT}/${NS}/terraform.tfstate"
 
-          if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-            echo "S3 bucket exists: $BUCKET"
-          else
-            echo "Creating S3 bucket: $BUCKET"
-            if [ "$AWS_REGION_TFV" = "us-east-1" ]; then
-              aws s3api create-bucket --bucket "$BUCKET" --region "$AWS_REGION_TFV"
-            else
-              aws s3api create-bucket \
-                --bucket "$BUCKET" \
-                --region "$AWS_REGION_TFV" \
-                --create-bucket-configuration LocationConstraint="$AWS_REGION_TFV"
-            fi
+          echo "tfvars=$TFVARS" >> "$GITHUB_OUTPUT"
+          echo "project_name=$PROJECT_NAME" >> "$GITHUB_OUTPUT"
+          echo "environment=$ENVIRONMENT" >> "$GITHUB_OUTPUT"
+          echo "aws_region=$AWS_REGION_TFV" >> "$GITHUB_OUTPUT"
+          echo "ns=$NS" >> "$GITHUB_OUTPUT"
+          echo "state_key=$STATE_KEY" >> "$GITHUB_OUTPUT"
 
-            aws s3api put-public-access-block --bucket "$BUCKET" --public-access-block-configuration \
-              'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
+      - name: Bootstrap init + select workspace
+        shell: bash
+        working-directory: terraform/bootstrap
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color
+          terraform workspace select "${{ steps.env.outputs.environment }}" \
+            || terraform workspace new "${{ steps.env.outputs.environment }}"
 
-            aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
+      - name: Read backend (bucket + lock table) from bootstrap outputs (with fallback)
+        id: backend
+        shell: bash
+        working-directory: terraform/bootstrap
+        run: |
+          set -euo pipefail
 
-            aws s3api put-bucket-encryption --bucket "$BUCKET" --server-side-encryption-configuration \
-              '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+          BUCKET="$(terraform output -raw state_bucket_name)"
+          if [ -z "${BUCKET}" ]; then
+            echo "ERROR: bootstrap output state_bucket_name is empty."
+            exit 1
+          fi
+
+          # tenta pegar lock table via output; se não existir, fallback no padrão
+          LOCK_TABLE="$(terraform output -raw dynamodb_table_name 2>/dev/null || true)"
+          if [ -z "${LOCK_TABLE}" ]; then
+            ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+            LOCK_TABLE="${{ steps.env.outputs.project_name }}-terraform-locks-${ACCOUNT_ID}-${{ steps.env.outputs.aws_region }}-${{ steps.env.outputs.environment }}"
           fi
 
           echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
-          echo "region=$AWS_REGION_TFV" >> "$GITHUB_OUTPUT"
+          echo "lock_table=$LOCK_TABLE" >> "$GITHUB_OUTPUT"
 
-      - name: Terraform init
+      - name: Terraform init (remote backend)
+        shell: bash
         working-directory: terraform
         run: |
+          set -euo pipefail
           terraform init -input=false -reconfigure \
             -backend-config="bucket=${{ steps.backend.outputs.bucket }}" \
             -backend-config="key=${{ steps.env.outputs.state_key }}" \
-            -backend-config="region=${{ steps.backend.outputs.region }}" \
+            -backend-config="region=${{ steps.env.outputs.aws_region }}" \
+            -backend-config="dynamodb_table=${{ steps.backend.outputs.lock_table }}" \
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true"
 
-      - name: Terraform apply
+      - name: Terraform plan (log/auditoria)
+        shell: bash
         working-directory: terraform
-        run: terraform apply -var-file=${{ steps.env.outputs.tfvars }} -input=false -auto-approve -no-color
+        run: terraform plan -var-file="${{ steps.env.outputs.tfvars }}" -input=false -no-color
 
-      - name: Setup kubectl + kubeconfig
-        if: ${{ github.event_name == 'push' || inputs.apply_k8s == 'true' }}
+      - name: Terraform apply
+        shell: bash
+        working-directory: terraform
+        run: terraform apply -var-file="${{ steps.env.outputs.tfvars }}" -input=false -auto-approve -no-color
+
+      - name: Install kubectl
+        if: ${{ inputs.apply_k8s == true }}
+        uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - name: Setup kubeconfig
+        if: ${{ inputs.apply_k8s == true }}
         shell: bash
         run: |
           set -euo pipefail
-          aws --version
-          kubectl version --client
-
-          # pega nome do cluster do Terraform
-          CLUSTER_NAME="$(cd terraform && terraform output -raw eks_cluster_name 2>/dev/null || true)"
+          CLUSTER_NAME="$(terraform -chdir=terraform output -raw eks_cluster_name 2>/dev/null || true)"
           if [ -z "${CLUSTER_NAME}" ]; then
             echo "ERROR: Terraform output 'eks_cluster_name' not found."
             exit 1
           fi
-
-          aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region us-east-1
+          aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${{ steps.env.outputs.aws_region }}"
           kubectl get nodes
 
       - name: Apply addons
-        if: ${{ github.event_name == 'push' || inputs.apply_k8s == 'true' }}
+        if: ${{ inputs.apply_k8s == true }}
         run: kubectl apply -k k8s/addons
-
-      - name: Apply app
-        if: ${{ github.event_name == 'push' || inputs.apply_k8s == 'true' }}
-        run: kubectl apply -k k8s/base

@@ -4,12 +4,9 @@ provider "aws" {
 
 data "aws_caller_identity" "current" {}
 
-resource "random_id" "bucket_suffix" {
-  byte_length = 3
-}
 
 locals {
-  tfstate_bucket_name = "${var.project_name}-tfstate-${data.aws_caller_identity.current.account_id}-${var.aws_region}-${var.environment}-${random_id.bucket_suffix.hex}"
+  tfstate_bucket_name = "${var.project_name}-tfstate-${data.aws_caller_identity.current.account_id}-${var.aws_region}-${var.environment}"
 
   common_tags = {
     Environment = var.environment
