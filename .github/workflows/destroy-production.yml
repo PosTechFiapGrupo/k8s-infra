@@ -7,6 +7,30 @@ on:
         description: 'Type "destroy-prod" to confirm'
         required: true
         type: string
+      ns:
+        description: "Namespace/pessoa (ex: grupo19)"
+        required: true
+        default: "grupo19"
+        type: string
+      bucket:
+        description: "S3 bucket do backend (EXATO). Ex: tech-challenge-tfstate-209757840409-us-east-1-prod-3913db"
+        required: true
+        type: string
+      aws_region:
+        description: "AWS region"
+        required: true
+        default: "us-east-1"
+        type: string
+      state_prefix:
+        description: "Prefixo do state no bucket"
+        required: true
+        default: "state"
+        type: string
+      repo_key:
+        description: "Nome lógico do repo para a key"
+        required: true
+        default: "infra-k8s"
+        type: string
 
 permissions:
   contents: read
@@ -16,45 +40,38 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
 
-    defaults:
-      run:
-        working-directory: terraform
-
     env:
-      BACKEND_KEY: env/prod/terraform.tfstate
+      TF_DIR: terraform
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Rodar fora do working-directory default (terraform)
       - name: Safety check (manual confirmation)
         shell: bash
-        working-directory: .
         run: |
           set -euo pipefail
           if [ "${{ inputs.confirm }}" != "destroy-prod" ]; then
-            echo "Confirmation failed. You must type: destroy-prod"
+            echo 'Confirmation failed. You must type: destroy-prod'
             exit 1
           fi
 
-      - name: Debug structure (repo + terraform dir)
+      - name: Debug structure
         shell: bash
-        working-directory: .
         run: |
           set -euo pipefail
           echo "Repo root:"
           ls -la
           echo ""
           echo "Terraform dir:"
-          if [ ! -d terraform ]; then
+          if [ ! -d "${{ env.TF_DIR }}" ]; then
             echo "ERROR: terraform/ directory not found at repo root."
             exit 1
           fi
-          ls -la terraform
+          ls -la "${{ env.TF_DIR }}"
           echo ""
-          echo "tfvars candidates under terraform/:"
-          find terraform -maxdepth 3 -type f -name "*.tfvars*" -o -name "*.tfvars" | sed 's|^| - |' || true
+          echo "tfvars candidates:"
+          find "${{ env.TF_DIR }}" -maxdepth 3 -type f -name "*.tfvars*" -o -name "*.tfvars" | sed 's|^| - |' || true
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -66,23 +83,19 @@ jobs:
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region:            ${{ inputs.aws_region }}
 
       - name: Pick tfvars (prod)
         id: tfvars
         shell: bash
         run: |
           set -euo pipefail
+          cd "${{ env.TF_DIR }}"
 
-          # Estamos dentro de terraform/ por causa do defaults.run.working-directory
+          # Ajuste aqui se seu repo usa outro caminho/padrão
           CANDIDATES=(
             "terraform.tfvars.prod"
             "terraform.tfvars"
-            "terraform.tfvars.example"
-            "env/prod/terraform.tfvars"
-            "env/prod/terraform.tfvars.prod"
-            "vars/prod.tfvars"
-            "vars/production.tfvars"
           )
 
           for f in "${CANDIDATES[@]}"; do
@@ -93,16 +106,17 @@ jobs:
             fi
           done
 
-          echo "ERROR: terraform.tfvars.prod (preferred) or other tfvars not found in terraform/."
-          echo "Searched:"
+          echo "ERROR: No production tfvars found."
+          echo "Expected one of:"
           printf ' - %s\n' "${CANDIDATES[@]}"
           exit 1
 
-      - name: Validate tfvars are PRODUCTION
+      - name: Validate tfvars is PRODUCTION (environment=prod/production)
         id: validate
         shell: bash
         run: |
           set -euo pipefail
+          cd "${{ env.TF_DIR }}"
           tfv="${{ steps.tfvars.outputs.file }}"
 
           get_tfvar() {
@@ -117,57 +131,70 @@ jobs:
           if [ -z "${PROJECT_NAME}" ] || [ -z "${ENVIRONMENT}" ] || [ -z "${AWS_REGION_TFV}" ]; then
             echo "ERROR: Could not parse project_name/environment/aws_region from ${tfv}."
             echo "Make sure they exist and are quoted, e.g.:"
-            echo 'project_name = "myproj"'
+            echo 'project_name = "tech-challenge"'
             echo 'environment  = "prod"'
             echo 'aws_region   = "us-east-1"'
             exit 1
           fi
 
-          # trava extra: só deixa destruir se for prod/production
           if [ "${ENVIRONMENT}" != "prod" ] && [ "${ENVIRONMENT}" != "production" ]; then
             echo "ERROR: environment in ${tfv} is '${ENVIRONMENT}', expected 'prod' or 'production'."
             exit 1
-          fi
-
-          # aviso se cair no example (não bloqueia, mas deixa explícito no log)
-          if [[ "$tfv" == *".example" ]]; then
-            echo "WARNING: Using a .example tfvars file for production destroy. Ensure values are REAL."
           fi
 
           echo "project_name=$PROJECT_NAME" >> "$GITHUB_OUTPUT"
           echo "environment=$ENVIRONMENT" >> "$GITHUB_OUTPUT"
           echo "aws_region=$AWS_REGION_TFV" >> "$GITHUB_OUTPUT"
 
-      - name: Ensure remote backend bucket exists (S3)
+      - name: Build backend key + lock table
         id: backend
         shell: bash
         run: |
           set -euo pipefail
 
-          PROJECT_NAME="${{ steps.validate.outputs.project_name }}"
+          NS="${{ inputs.ns }}"
+          STATE_PREFIX="${{ inputs.state_prefix }}"
+          REPO_KEY="${{ inputs.repo_key }}"
           ENVIRONMENT="${{ steps.validate.outputs.environment }}"
-          AWS_REGION_TFV="${{ steps.validate.outputs.aws_region }}"
+          AWS_REGION="${{ inputs.aws_region }}"
+
+          # ✅ seu padrão pedido:
+          STATE_KEY="${STATE_PREFIX}/${REPO_KEY}/${ENVIRONMENT}/${NS}/terraform.tfstate"
 
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          BUCKET="${PROJECT_NAME}-tfstate-${ACCOUNT_ID}-${AWS_REGION_TFV}-${ENVIRONMENT}"
+          # ✅ padrão de lock table
+          LOCK_TABLE="${{ steps.validate.outputs.project_name }}-terraform-locks-${ACCOUNT_ID}-${AWS_REGION}-${ENVIRONMENT}"
 
-          echo "Checking backend bucket: $BUCKET (region: $AWS_REGION_TFV)"
+          echo "state_key=${STATE_KEY}" >> "$GITHUB_OUTPUT"
+          echo "lock_table=${LOCK_TABLE}" >> "$GITHUB_OUTPUT"
+
+          echo "Resolved backend:"
+          echo "  bucket    = ${{ inputs.bucket }}"
+          echo "  region    = ${AWS_REGION}"
+          echo "  key       = ${STATE_KEY}"
+          echo "  lock      = ${LOCK_TABLE}"
+          echo "  tfvars    = ${{ steps.tfvars.outputs.file }}"
+
+      - name: Ensure backend bucket exists (S3)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUCKET="${{ inputs.bucket }}"
           if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
             echo "ERROR: backend bucket does not exist (or no access): $BUCKET"
             exit 1
           fi
 
-          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
-          echo "region=$AWS_REGION_TFV" >> "$GITHUB_OUTPUT"
-
       - name: Terraform init (remote backend)
         shell: bash
         run: |
           set -euo pipefail
-          terraform init -input=false -reconfigure \
-            -backend-config="bucket=${{ steps.backend.outputs.bucket }}" \
-            -backend-config="key=${{ env.BACKEND_KEY }}" \
-            -backend-config="region=${{ steps.backend.outputs.region }}" \
+
+          terraform -chdir="${{ env.TF_DIR }}" init -input=false -reconfigure \
+            -backend-config="bucket=${{ inputs.bucket }}" \
+            -backend-config="key=${{ steps.backend.outputs.state_key }}" \
+            -backend-config="region=${{ inputs.aws_region }}" \
+            -backend-config="dynamodb_table=${{ steps.backend.outputs.lock_table }}" \
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true"
 
@@ -175,7 +202,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          terraform plan -destroy \
+          terraform -chdir="${{ env.TF_DIR }}" plan -destroy \
             -var-file="${{ steps.tfvars.outputs.file }}" \
             -input=false -no-color
 
@@ -183,6 +210,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          terraform destroy \
+          terraform -chdir="${{ env.TF_DIR }}" destroy \
             -var-file="${{ steps.tfvars.outputs.file }}" \
             -input=false -auto-approve -no-color
